@@ -17,56 +17,122 @@ library(ggtext)
 library(GGally)
 library(broom)
 library(jtools)
+library(kableExtra)
+library(patchwork)
 
 ```
-use binary logistic regression to test feasibility of using variables plant height (height), canopy length (length), canopy width (width), and number of green leaves (green_lvs) to classify whether a palmetto is species Serenoa repens or Sabal etonia. Use code folding and hide all messages & warnings in your knitted HTML. 
+# Exploring two palmetto plant species with binary logistic regression.
 
+Using binary logistic regression to test feasibility of using variables plant height (height), canopy length (length), canopy width (width), and number of green leaves (green_lvs) to classify whether a palmetto is species Serenoa repens or Sabal etonia.
 
 Data source: Abrahamson, W.G. 2019. Survival, growth and biomass estimates of two dominant palmetto species of south-central Florida from 1981 - 2017, ongoing at 5-year intervals ver 1. Environmental Data Initiative. https://doi.org/10.6073/pasta/f2f96ec76fbbd4b9db431c79a770c4d5
 
 More information and metadata: https://portal.edirepository.org/nis/metadataviewer?packageid=edi.317.1
+
+Start by examining the data roughly.
 ```{r}
 # read in data
 
+palmetto_n <- read_csv("palmetto.csv") %>% clean_names() %>% 
+  select(height, length, width, green_lvs, species, plant) %>%
+  mutate(species = ifelse(species == 1, 1,
+                          ifelse(species == 2, 0, 2)))
 
-palmetto <- read_csv("palmetto.csv") %>% clean_names() %>% 
-  select(height, length, width, green_lvs, species, plant) %>% 
+palmetto_w <- palmetto_n %>% 
   mutate(species = ifelse(species == 1, "Serenoa repens",
-                          ifelse(species == 2, "Sabal etonia", 0)))
-
+                          ifelse(species == 0, "Sabal etonia", 0))) %>%
+  group_by(species) %>% 
+  pivot_longer(cols = c(height:green_lvs), names_to = "measurement", values_to = "value") %>% 
+  mutate(measurement = as.factor(measurement)) %>% ungroup()
+  
 # look at data
-look <- palmetto %>%
+look <- palmetto_n %>%
   select(species, height:green_lvs) %>% 
-  ggpairs(aes(color = species))
+  ggpairs(aes(color = as.factor(species)))
 
 look
 ```
 
-## binary logistic regression
+The exploratory graphs seem to indicate some potential trends, depicted more formally below.
 
 ```{r}
-palmetto_blr <- glm(as.factor(species) ~ height + length + width, green_lvs, 
-                            data = palmetto, 
+# generate some nice figures based off the findings in look
+
+levels(palmetto_w$measurement) <- c("height (cm)", "canopy length (cm)","canopy width (cm)", "green leaves (count)")
+
+p_1 <- ggplot(drop_na(palmetto_w))+
+  geom_violin(aes(x = species, y = value, color = measurement))+theme_minimal()+facet_wrap(~measurement, labeller = labeller(levels(palmetto_w$measurement)), scales = "free_y")+
+  labs(title = "distribution of various palmeto parameters by species",
+       caption = str_wrap("Measurements for two species of palmeto. 12460 values recorded for each parameter.", 90),
+       x = "Species",
+       y = "Value")
+
+p_1
+
+```
+```{r}
+palmetto_ng <- palmetto_n %>% 
+  mutate(species = ifelse(species == 1, "Serenoa repens",
+                          ifelse(species == 0, "Sabal etonia", 0)))
+
+p_2 <- ggplot(drop_na(palmetto_ng))+
+  geom_point(aes(x = width, y = height, color = green_lvs, alpha = length))+ facet_wrap(~species)+theme_minimal()+
+  labs(title = "distribution of various palmeto parameters",
+       caption = str_wrap("Measurements for two species of palmeto. 12460 values recorded for each parameter.", 90),
+       x = "Canopy Width",
+       y = "Height",
+       color = "number of green leaves",
+       alpha = "Canopy Length")+
+  scale_color_viridis_c()
+
+p_2
+```
+
+It's hard to tell if any of these parameters can clearly distinguish one species from another, but possibly a linear model can help! It seems like number of green leaves might be a good differentiating parameter.
+
+## binary logistic regression
+
+Construct a model that predicts species based off height, length, width, and green leaves. (species ~ height + length + width + green_lvs)
+
+```{r}
+palmetto_blr <- glm(species ~ height + length + width + green_lvs, 
+                            data = palmetto_n, 
                             family = "binomial")
 
 # Look at the model: 
 
-palmetto_blr
+#palmetto_blr
 
-summary(palmetto_blr)
+#summary(palmetto_blr)
 
 # Get a tidy version w/ broom: 
 blr_tidy <- broom::tidy(palmetto_blr)
+
+#blr_tidy
 
 # above are the coefficients for log odds
 
 # convert to probabilities
 
 blr_fitted <- palmetto_blr %>% 
-  broom::augment(type.predict = "response")
+  broom::augment(newdata = palmetto_n, type.predict = "response") %>% 
+  mutate("correctly_classified" = case_when((.fitted >= 0.5 & species == 1) ~ 1,
+                                            (.fitted <= 0.5 & species == 0) ~ 1,
+                                            TRUE ~ 0))
+
+blr_final <- blr_fitted %>%
+  mutate(species = ifelse(species == 1, "Serenoa repens",
+                          ifelse(species == 0, "Sabal etonia", 0))) %>%
+  group_by(species) %>% 
+  summarise("Number Correctly Classified" = sum(correctly_classified),
+            "Number Incorrectly Classified" = (n()-sum(correctly_classified)),
+            "% Correctly Classified" = round(sum(correctly_classified)/n()*100, 1))
+
+kbl(blr_final) %>% 
+  kable_styling()
 
 ```
-Vizualize findings
+We can also vizualize these findings
 
 ```{r}
 
@@ -74,62 +140,41 @@ ggplot(data = blr_fitted, aes(x = green_lvs, y = .fitted)) +
   geom_point(aes(color = species)) +
   geom_smooth(aes(color = species), se = FALSE) +
   labs(x = "Number of green leaves",
-       y = "Probability of outcome Sabal etonia")+
+       y = "Probability of outcome Sabal etonia",
+       title = "Probability palmeto species is Sabal etonia based on number of green leaves",
+       caption = str_wrap("a binomial linear model was fitted to data on two species of palmeto to predict the probability of being the Sabal etonia species based off knowledge of the plant's height, length, width, and number of green leaves. This model was then used to predict the probability of being this species, and this graph specifically shows how this correlates to the number of green leaves.", 100))+
   theme_minimal()
+```
 
-# Visualization of p(Sabal etonia) by variable
-
+Visualization of p(Sabal etonia) by variable
+```{r}
 # For length:
 effect_plot(palmetto_blr, 
             pred = length, 
             interval = TRUE, 
             y.label = "Probability of 'Sabal etonia'")
+```
 
+```{r}
 # For height:
 effect_plot(palmetto_blr, 
             pred = height, 
             interval = TRUE, 
             y.label = "Probability of 'Sabal etonia'")
+```
 
+```{r}
 # for width
 effect_plot(palmetto_blr, 
             pred = width, 
             interval = TRUE, 
             y.label = "Probability of 'Sabal etonia'")
+```
 
+```{r}
 # for green leaves
 effect_plot(palmetto_blr, 
             pred = green_lvs, 
             interval = TRUE, 
             y.label = "Probability of 'Sabal etonia'")
-
-
-# Predictions for new values with `predict()`
-
-What is the probability that a plant of  height XXXX with a length of XXXX, width of XXXX, and XXXX number of green leaves will be Sabal etonia?
-
-ex_1 <- predict(palmetto_blr, 
-                data.frame(height = 120, 
-                length = 250, 
-                width = 200),
-                green_lvs = 15)
-
-# Based on the model, the probability that this plant is a Sabal etonia is XXXX.
 ```
-
-You can also feed in a new data frame, with multiple penguin observations, to get model probability estimates for more than one plant: 
-
-```{r}
-new_df <- data.frame(
-  height = c(70, 120, 170),
-  length = c(110, 170, 220),
-  width = c(100, 160, 210),
-  green_lvs = c(7, 12, 17)
-)
-
-ex_2 <- predict(palmetto_blr,
-                new_df,
-                type = "response")
-
-```
-
